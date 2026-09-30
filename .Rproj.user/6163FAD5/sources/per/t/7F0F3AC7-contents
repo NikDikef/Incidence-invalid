@@ -1,0 +1,5472 @@
+---
+author: "Никита Бурлов"
+title: "Анализ временных рядов"
+subtitle: "Версия 1.0"
+date: today
+format:
+  html:
+    embed-resources: true
+    #embed-resources: false
+    smooth-scroll: true
+    code-fold: true
+    code-overflow: wrap
+    code-block-bg: true
+    code-block-border-left: "#1F77B4FF"
+    code-copy: hover
+    toc: true
+    toc-title: "Оглавление"
+    number-sections: true
+    fig-align: "center"
+  docx:
+    reference-doc: "Data/Example/template.docx"
+    toc: true
+    number-sections: true
+    toc-title: "Оглавление"
+    fig-align: "center"
+crossref:
+  chapters: true
+editor: source
+#echo: true
+echo: false
+warning: false
+message: false
+error: false
+cache: false
+editor_options: 
+  chunk_output_type: console
+knitr:
+  opts_chunk:
+    fig.path: "Data/Results/Figures/"
+    fig.dpi: 400
+---
+
+```{r}
+#| label: 1-setup
+#| include: false
+
+library(tidyverse)
+library(fable)
+library(tsibble)
+library(nlme)
+library(marginaleffects)
+library(sandwich)
+library(patchwork)
+library(gtsummary)
+library(flextable)
+library(ggsci)
+
+df <- readxl::read_excel("Data/Original/df.xlsx")
+
+dict <- readxl::read_excel("Data/Original/df.xlsx",
+                           sheet = "Label")
+
+library(labelled)
+
+for (i in seq_len(nrow(dict))) {
+ var_name <- dict$Var[i]
+ var_label <- dict$Label[i]
+ 
+ if (var_name %in% names(df)) {
+  var_label(df[[var_name]]) <- var_label
+ }
+}
+
+tab_tbl <- function(tbl){
+ as_flex_table(tbl) |>
+  theme_box() |> 
+  autofit() |> 
+  fit_to_width(8) |> 
+  font(fontname = "Times New Roman", part = "all") |> 
+  fontsize(size = 12, part = "all") 
+}
+
+tab_ME <- function(ME){
+ flextable(ME) |> 
+  theme_box() |> 
+  autofit() |> 
+  fit_to_width(8) |> 
+  font(fontname = "Times New Roman", part = "all") |> 
+  fontsize(size = 12, part = "all") 
+}
+
+theme_public <- function() {
+ theme_bw(base_size = 16) +
+  theme(strip.background = element_rect(fill = "grey95"))
+}
+
+theme_set(theme_public())
+
+set.seed(42)
+cols <- pal_gephi("pimp")(11)
+```
+
+# Описание
+
+Учитывая структуру данных, мы введем некоторые предположения и обсудим ограничения:\
+1. Это временные данные, т.е. важен порядок (от 2019 до 2023) и автокорреляция;\
+2. Всего 5 годов по объединению и 11 регонам, т.е. для применения методов анализа временных рядов мало временных точек и много групп;\
+3. Учитывая малое количество данных, внести учет случайных первого значения (intercept) и наклона (slope) не будет продуктивно;\
+4. Для оценки будем использовать линейную регрессию, где для общих значений будет включена переменная времени, для оценки по регионам будут включены переменные регионов, времени и их взаимодействие. Для коррекции стандартных ошибок (а следовательно и доверительных интервалов -- ДИ) будет использовать Heteroscedasticity and Autocorrelation Consistent (HAC) Covariance Matrix Estimation (функция vcovHAC из пакета sandwich);\
+5. Связь может быть нелинейной, но т.к. временных точек мало, то мы предположим, что оценка среднего значения с 95% ДИ достаточно для апроксимации и обобщения;\
+6. Интерпретация результатов -- при увеличении времени на 1 год значение исхода, который оцениваем, увеличивается на в среднем на значение из таблицы разности средних.\
+7. Для абсолютных значений для анализа по регионам рассчитаем какую долю от всех инвалидностей каждый регион составляет. Соответственно и модели будут оценивать это.
+
+# Первичная инвалидность
+
+## Уровень инвалидности
+
+### Без разделения на группы и возрастные категории.
+
+#### Весь округ
+
+\
+Рисунок 1. Уровень первичной инвалидности (на 10 тыс. населения), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 2-prim-rate-all-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+```{r}
+#| label: 3-prim-rate-all-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 2. Уровень первичной инвалидности (на 10 тыс. населения), по регионам округа
+
+```{r}
+#| label: 4-prim-rate-all-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 10)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 3. Уровень первичной инвалидности (на 10 тыс. населения), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 5-prim-rate-all-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 10)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+```{r}
+#| label: 6-prim-rate-all-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 1. Различия среднегодовой динамики уровня первичной инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 7-prim-rate-all-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 4. Уровень первичной инвалидности (на 10 тыс. населения), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 8-prim-rate-all-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 9-explore-tsibble
+#| include: false
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ tsibble::as_tsibble(index = Year, key = Region) |> 
+ model(TSLM(Group_inc ~ trend())) |> 
+ tidy() |> 
+ filter(term == "trend()")
+```
+
+
+### I категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 5. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 10-prim-rate-g1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "I", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 1)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 11-prim-rate-g1-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "I", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`. Т.е. изменеия не фиксируются для I категории.
+
+#### По регионам
+
+\
+Рисунок 6. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по регионам округа
+
+```{r}
+#| label: 12-prim-rate-g1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "I", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 7. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 13-prim-rate-g1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "I", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 1)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 14-prim-rate-g1-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "I", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Чаще наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 2. Различия среднегодовой динамики уровня первичной инвалидности среди лиц I группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 15-prim-rate-g1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`. В Забайкальский край и Республика Саха (Якутия) изменений нет совсем.
+
+\
+Рисунок 8. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 16-prim-rate-g1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "I", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 1)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+### II категория инвалидности
+
+#### Весь округ 
+
+\
+Рисунок 9. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 17-prim-rate-g2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "II", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 3)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 18-prim-rate-g2-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "II", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 10. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по регионам округа
+
+```{r}
+#| label: 19-prim-rate-g2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "II", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 3)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 11. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 20-prim-rate-g2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "II", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 3)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 21-prim-rate-g2-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "II", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 3. Различия среднегодовой динамики уровня первичной инвалидности среди лиц II группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 22-prim-rate-g2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 12. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 23-prim-rate-g2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "II", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 3)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+### III категория инвалидности
+
+#### Весь округ 
+
+\
+Рисунок 13. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 24-prim-rate-g3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "III", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 25-prim-rate-g3-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "III", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам 
+
+\
+Рисунок 14. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по регионам округа
+
+```{r}
+#| label: 26-prim-rate-g3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "III", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 10)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 15. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 27-prim-rate-g3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "III", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 10)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 28-prim-rate-g3-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "III", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 4. Различия среднегодовой динамики уровня первичной инвалидности среди лиц III группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 29-prim-rate-g3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 16. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 30-prim-rate-g3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "III", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+
+Точка -- значение показателя на указанный момент времени.
+
+### Возраст 18-44
+
+#### Весь округ 
+
+\
+Рисунок 17. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 31-prim-rate-a1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Age == "18-44", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 5)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 32-prim-rate-a1-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Age == "18-44", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам 
+
+\
+Рисунок 18. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по регионам округа
+
+```{r}
+#| label: 33-prim-rate-a1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 5)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 19. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 34-prim-rate-a1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 5)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 35-prim-rate-a1-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Нет региона, где наблюдается наибольший `r attr(df$Age_inc, "label")`.
+
+\
+Таблица 5. Различия среднегодовой динамики уровня первичной инвалидности среди лиц в возрасте 18-44 года между регионами округа (95% ДИ)
+
+```{r}
+#| label: 36-prim-rate-a1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое изменение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 20. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 37-prim-rate-a1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 5)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+### Возраст жен 45-54, 45-59 муж
+
+#### Весь округ 
+
+\
+Рисунок 21. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 38-prim-rate-a2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 39-prim-rate-a2-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам 
+
+\
+Рисунок 22. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 40-prim-rate-a2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 15)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 23. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 41-prim-rate-a2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 15)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 42-prim-rate-a2-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 6. Различия среднегодовой динамики уровня первичной инвалидности среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 43-prim-rate-a2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 24. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 44-prim-rate-a2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 15)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+### Возраст жен старше 50, муж старше 60
+
+#### Весь округ 
+
+\
+Рисунок 25. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 45-prim-rate-a3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 46-prim-rate-a3-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам
+
+\
+Рисунок 26. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 47-prim-rate-a3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 20)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 27. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 48-prim-rate-a3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Первичный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 20)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 49-prim-rate-a3-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 7. Различия среднегодовой динамики уровня первичной инвалидности среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 50-prim-rate-a3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 28. Уровень первичной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 51-prim-rate-a3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 20)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+## Количество инвалидности
+
+### Без разделения на группы и возрастные категории.
+
+#### Весь округ 
+
+```{r}
+#| label: 52-prim-prep-pct-grp
+df_count <- df |> 
+ filter(Status == "Первичный") |> 
+ group_by(Year, Group) |> 
+ mutate(Group_count_pct = (Group_count / Group_count[Region == "Всего"]) * 100) |> 
+ ungroup() 
+```
+
+
+\
+Рисунок 29. Число случаев первичной инвалидности (абс.), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 53-prim-cnt-all-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(1500, 4000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 54-prim-cnt-all-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 30. Число случаев первичной инвалидности (абс.), по регионам округа
+
+```{r}
+#| label: 55-prim-cnt-all-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "Всего", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1500)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 31. Доля случаев первичной инвалидности от общего числа по округу (%), по регионам округа
+
+```{r}
+#| label: 56-prim-pct-all-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "Всего", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 32. Доля случаев первичной инвалидности от общего числа по округу (%), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 57-prim-pct-all-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "Всего", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 58-prim-pct-all-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 8. Различия среднегодовой динамики доли случаев первичной инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 59-prim-pct-all-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 33. Доля случаев первичной инвалидности от общего числа по округу (%), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 60-prim-pct-all-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+### I категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 34. Число случаев первичной инвалидности (абс.) среди лиц I группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 61-prim-cnt-g1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "I", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 100)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 62-prim-cnt-g1-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "I", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 35. Число случаев первичной инвалидности (абс.) среди лиц I группы инвалидности, по регионам округа
+
+```{r}
+#| label: 63-prim-cnt-g1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "I", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 20)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 36. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц I группы инвалидности, по регионам округа
+
+```{r}
+#| label: 64-prim-pct-g1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "I", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 37. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц I группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 65-prim-pct-g1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "I", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 66-prim-pct-g1-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "I", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Не выявлен наибольший `r attr(df$Group_inc, "label")`.
+
+\
+Таблица 9. Различия среднегодовой динамики доли случаев первичной инвалидности среди лиц I группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 67-prim-pct-g1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 38. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц I группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 68-prim-pct-g1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "I", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+
+### II категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 39. Число случаев первичной инвалидности (абс.) среди лиц II группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 69-prim-cnt-g2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "II", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 70-prim-cnt-g2-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "II", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 40. Число случаев первичной инвалидности (абс.) среди лиц II группы инвалидности, по регионам округа
+
+```{r}
+#| label: 71-prim-cnt-g2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "II", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 400)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 41. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц II группы инвалидности, по регионам округа
+
+```{r}
+#| label: 72-prim-pct-g2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "II", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 42. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц II группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 73-prim-pct-g2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "II", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 74-prim-pct-g2-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "II", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 10. Различия среднегодовой динамики доли случаев первичной инвалидности среди лиц II группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 75-prim-pct-g2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 43. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц II группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 76-prim-pct-g2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "II", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+### III категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 44. Число случаев первичной инвалидности (абс.) среди лиц III группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 77-prim-cnt-g3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "III", Status == "Первичный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(1000, 2500)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 78-prim-cnt-g3-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "III", Status == "Первичный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам
+
+\
+Рисунок 45. Число случаев первичной инвалидности (абс.) среди лиц III группы инвалидности, по регионам округа
+
+```{r}
+#| label: 79-prim-cnt-g3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "III", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 46. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц III группы инвалидности, по регионам округа
+
+```{r}
+#| label: 80-prim-pct-g3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "III", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 47. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц III группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 81-prim-pct-g3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "III", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 82-prim-pct-g3-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "III", Status == "Первичный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 11. Различия среднегодовой динамики доли случаев первичной инвалидности среди лиц III группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 83-prim-pct-g3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 48. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц III группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 84-prim-pct-g3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "III", Status == "Первичный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+
+### Возраст 18-44
+
+#### Весь округ
+
+
+```{r}
+#| label: 85-prim-prep-pct-age
+df_count <- df |> 
+ filter(Status == "Первичный") |> 
+ group_by(Year, Age) |> 
+ mutate(Age_count_pct = (Age_count / Age_count[Region == "Всего"]) * 100) |> 
+ ungroup() 
+```
+
+
+\
+Рисунок 49. Число случаев первичной инвалидности (абс.) среди лиц в возрасте 18-44 года, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 86-prim-cnt-a1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 87-prim-cnt-a1-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Age == "18-44") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 50. Число случаев первичной инвалидности (абс.) среди лиц в возрасте 18-44 года, по регионам округа
+
+```{r}
+#| label: 88-prim-cnt-a1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 200)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 51. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте 18-44 года, по регионам округа
+
+```{r}
+#| label: 89-prim-pct-a1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 52. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте 18-44 года, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 90-prim-pct-a1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 91-prim-pct-a1-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Не выявлен наибольший `r attr(df$Age_count, "label")`.
+
+\
+Таблица 12. Различия среднегодовой динамики доли случаев первичной инвалидности среди лиц в возрасте 18-44 года между регионами округа (95% ДИ)
+
+```{r}
+#| label: 92-prim-pct-a1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 53. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте 18-44 года, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 93-prim-pct-a1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+### Возраст жен 45-54, 45-59 муж
+
+#### Весь округ
+
+\
+Рисунок 54. Число случаев первичной инвалидности (абс.) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 94-prim-cnt-a2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 95-prim-cnt-a2-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 55. Число случаев первичной инвалидности (абс.) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 96-prim-cnt-a2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 500)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 56. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 97-prim-pct-a2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 57. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 98-prim-pct-a2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 99-prim-pct-a2-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 13. Различия среднегодовой динамики доли случаев первичной инвалидности среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 100-prim-pct-a2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 58. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 101-prim-pct-a2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+
+### Возраст жен старше 50, муж старше 60
+
+#### Весь округ
+
+
+\
+Рисунок 59. Число случаев первичной инвалидности (абс.) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 102-prim-cnt-a3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 2000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 103-prim-cnt-a3-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 60. Число случаев первичной инвалидности (абс.) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 104-prim-cnt-a3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 61. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 105-prim-pct-a3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 62. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 106-prim-pct-a3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 107-prim-pct-a3-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 14. Различия среднегодовой динамики доли случаев первичной инвалидности среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 108-prim-pct-a3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 63. Доля случаев первичной инвалидности от общего числа по округу (%) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 109-prim-pct-a3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+# Повторная инвалидность
+
+## Уровень инвалидности
+
+### Без разделения на группы и возрастные категории.
+
+#### Весь округ
+
+\
+Рисунок 64. Уровень повторной инвалидности (на 10 тыс. населения), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 110-rep-rate-all-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 20)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 111-rep-rate-all-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 65. Уровень повторной инвалидности (на 10 тыс. населения), по регионам округа
+
+```{r}
+#| label: 112-rep-rate-all-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 30)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 66. Уровень повторной инвалидности (на 10 тыс. населения), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 113-rep-rate-all-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 30)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 114-rep-rate-all-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 15. Различия среднегодовой динамики уровня повторной инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 115-rep-rate-all-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности не выявлено.
+
+\
+Рисунок 67. Уровень повторной инвалидности (на 10 тыс. населения), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 116-rep-rate-all-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 30)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+### I категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 68. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 117-rep-rate-g1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "I", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 1)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 118-rep-rate-g1-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "I", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 69. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по регионам округа
+
+```{r}
+#| label: 119-rep-rate-g1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "I", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 2)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 70. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 120-rep-rate-g1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "I", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 2)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 121-rep-rate-g1-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "I", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 16. Различия среднегодовой динамики уровня повторной инвалидности среди лиц I группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 122-rep-rate-g1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 71. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц I группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 123-rep-rate-g1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "I", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 2)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+### II категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 72. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 124-rep-rate-g2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "II", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 5)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 125-rep-rate-g2-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "II", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 73. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по регионам округа
+
+```{r}
+#| label: 126-rep-rate-g2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "II", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 10)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 74. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 127-rep-rate-g2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "II", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 10)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 128-rep-rate-g2-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "II", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 17. Различия среднегодовой динамики уровня повторной инвалидности среди лиц II группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 129-rep-rate-g2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 75. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц II группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 130-rep-rate-g2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "II", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+### III категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 76. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 131-rep-rate-g3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Group == "III", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 20)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 132-rep-rate-g3-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Group == "III", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 77. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по регионам округа
+
+```{r}
+#| label: 133-rep-rate-g3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Group == "III", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 30)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 78. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 134-rep-rate-g3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Group == "III", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 30)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 135-rep-rate-g3-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Group == "III", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_inc, "label")` наблюдается в `r max_inc[1, 1]` и Республика Бурятия.
+
+\
+Таблица 18. Различия среднегодовой динамики уровня повторной инвалидности среди лиц III группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 136-rep-rate-g3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности не выявлены.
+
+\
+Рисунок 79. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц III группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 137-rep-rate-g3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Group == "III", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 30)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+### Возраст 18-44
+
+#### Весь округ
+
+\
+Рисунок 80. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 138-rep-rate-a1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Age == "18-44", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 10)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 139-rep-rate-a1-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Age == "18-44", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 81. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по регионам округа
+
+```{r}
+#| label: 140-rep-rate-a1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 20)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 82. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 141-rep-rate-a1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 20)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 142-rep-rate-a1-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 19. Различия среднегодовой динамики уровня повторной инвалидности среди лиц в возрасте 18-44 года между регионами округа (95% ДИ)
+
+```{r}
+#| label: 143-rep-rate-a1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности не выявлены.
+
+\
+Рисунок 83. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 18-44 года, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 144-rep-rate-a1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Age == "18-44", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 20)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+### Возраст жен 45-54, 45-59 муж
+
+#### Весь округ
+
+\
+Рисунок 84. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 145-rep-rate-a2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 30)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 146-rep-rate-a2-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам
+
+\
+Рисунок 85. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 147-rep-rate-a2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 45)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 86. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 148-rep-rate-a2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 45)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 149-rep-rate-a2-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 20. Различия среднегодовой динамики уровня повторной инвалидности среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 150-rep-rate-a2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 87. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 151-rep-rate-a2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 45)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+### Возраст жен старше 50, муж старше 60
+
+#### Весь округ
+
+\
+Рисунок 88. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 152-rep-rate-a3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 30)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 153-rep-rate-a3-calc-trend
+md_all <- df |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+#### По регионам
+
+\
+Рисунок 89. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 154-rep-rate-a3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 70)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 90. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 155-rep-rate-a3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Повторный") |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 70)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 156-rep-rate-a3-calc-max
+
+fit <- df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_inc ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_inc, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 21. Различия среднегодовой динамики уровня повторной инвалидности среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 157-rep-rate-a3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности не выявлены.
+
+\
+Рисунок 91. Уровень повторной инвалидности (на 10 тыс. населения) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 158-rep-rate-a3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_inc)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 70)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+## Количество инвалидности
+
+
+### Без разделения на группы и возрастные категории.
+
+#### Весь округ
+
+```{r}
+#| label: 159-rep-prep-pct-grp
+df_count <- df |> 
+ filter(Status == "Повторный") |> 
+ group_by(Year, Group) |> 
+ mutate(Group_count_pct = (Group_count / Group_count[Region == "Всего"]) * 100) |> 
+ ungroup() 
+```
+
+
+\
+Рисунок 92. Число случаев повторной инвалидности (абс.), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 160-rep-cnt-all-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(2000, 10000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 161-rep-cnt-all-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "Всего", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 93. Число случаев повторной инвалидности (абс.), по регионам округа
+
+```{r}
+#| label: 162-rep-cnt-all-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "Всего", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 3000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 94. Доля случаев повторной инвалидности от общего числа по округу (%), по регионам округа
+
+```{r}
+#| label: 163-rep-pct-all-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "Всего", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 95. Доля случаев повторной инвалидности от общего числа по округу (%), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 164-rep-pct-all-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "Всего", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 165-rep-pct-all-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 22. Различия среднегодовой динамики доли случаев повторной инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 166-rep-pct-all-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое изменение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 96. Доля случаев повторной инвалидности от общего числа по округу (%), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 167-rep-pct-all-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "Всего", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+### I категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 97. Число случаев повторной инвалидности (абс.) среди лиц I группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 168-rep-cnt-g1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "I", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 200)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 169-rep-cnt-g1-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "I", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 98. Число случаев повторной инвалидности (абс.) среди лиц I группы инвалидности, по регионам округа
+
+```{r}
+#| label: 170-rep-cnt-g1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "I", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 99. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц I группы инвалидности, по регионам округа
+
+```{r}
+#| label: 171-rep-pct-g1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "I", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 100. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц I группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 172-rep-pct-g1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "I", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 173-rep-pct-g1-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "I", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 23. Различия среднегодовой динамики доли случаев повторной инвалидности среди лиц I группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 174-rep-pct-g1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 101. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц I группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 175-rep-pct-g1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "I", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+
+### II категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 102. Число случаев повторной инвалидности (абс.) среди лиц II группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 176-rep-cnt-g2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "II", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 2500)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 177-rep-cnt-g2-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "II", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Group_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 103. Число случаев повторной инвалидности (абс.) среди лиц II группы инвалидности, по регионам округа
+
+```{r}
+#| label: 178-rep-cnt-g2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "II", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 104. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц II группы инвалидности, по регионам округа
+
+```{r}
+#| label: 179-rep-pct-g2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "II", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 105. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц II группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 180-rep-pct-g2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "II", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 181-rep-pct-g2-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "II", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 24. Различия среднегодовой динамики доли случаев повторной инвалидности среди лиц II группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 182-rep-pct-g2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое изменение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 106. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц II группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 183-rep-pct-g2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "II", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+### III категория инвалидности
+
+#### Весь округ
+
+\
+Рисунок 107. Число случаев повторной инвалидности (абс.) среди лиц III группы инвалидности, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 184-rep-cnt-g3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Group == "III", Status == "Повторный") |> 
+ ggplot(aes(Year, Group_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(1000, 10000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 185-rep-cnt-g3-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Group == "III", Status == "Повторный") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Group_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_inc, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+
+
+#### По регионам
+
+\
+Рисунок 108. Число случаев повторной инвалидности (абс.) среди лиц III группы инвалидности, по регионам округа
+
+```{r}
+#| label: 186-rep-cnt-g3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "III", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 2000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 109. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц III группы инвалидности, по регионам округа
+
+```{r}
+#| label: 187-rep-pct-g3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Group == "III", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+\
+Рисунок 110. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц III группы инвалидности, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 188-rep-pct-g3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Group == "III", Region != "Всего") |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 189-rep-pct-g3-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Group == "III", Status == "Повторный") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Group_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Group_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 25. Различия среднегодовой динамики доли случаев повторной инвалидности среди лиц III группы инвалидности между регионами округа (95% ДИ)
+
+```{r}
+#| label: 190-rep-pct-g3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 111. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц III группы инвалидности, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 191-rep-pct-g3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Group == "III", Status == "Повторный") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Group_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+### Возраст 18-44
+
+#### Весь округ
+
+
+```{r}
+#| label: 192-rep-prep-pct-age
+df_count <- df |> 
+ filter(Status == "Повторный") |> 
+ group_by(Year, Age) |> 
+ mutate(Age_count_pct = (Age_count / Age_count[Region == "Всего"]) * 100) |> 
+ ungroup() 
+```
+
+
+\
+Рисунок 112. Число случаев повторной инвалидности (абс.) среди лиц в возрасте 18-44 года, по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 193-rep-cnt-a1-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 2500)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 194-rep-cnt-a1-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Age == "18-44") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 113. Число случаев повторной инвалидности (абс.) среди лиц в возрасте 18-44 года, по регионам округа
+
+```{r}
+#| label: 195-rep-cnt-a1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 114. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте 18-44 года, по регионам округа
+
+```{r}
+#| label: 196-rep-pct-a1-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 115. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте 18-44 года, по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 197-rep-pct-a1-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 198-rep-pct-a1-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 26. Различия среднегодовой динамики доли случаев повторной инвалидности среди лиц в возрасте 18-44 года между регионами округа (95% ДИ)
+
+```{r}
+#| label: 199-rep-pct-a1-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое изменение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 116. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте 18-44 года, по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 200-rep-pct-a1-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Age == "18-44") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+### Возраст жен 45-54, 45-59 муж
+
+#### Весь округ
+
+\
+Рисунок 117. Число случаев повторной инвалидности (абс.) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 201-rep-cnt-a2-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 3000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 202-rep-cnt-a2-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 118. Число случаев повторной инвалидности (абс.) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 203-rep-cnt-a2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 1000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 119. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 204-rep-pct-a2-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 120. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 205-rep-pct-a2-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 206-rep-pct-a2-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Не выявлен наибольший `r attr(df$Age_count, "label")`.
+
+\
+Таблица 27. Различия среднегодовой динамики доли случаев повторной инвалидности среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 207-rep-pct-a2-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 121. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте 45-54 года (женщины) и 45-59 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 208-rep-pct-a2-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен 45-54, 45-59 муж") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+
+
+
+
+### Возраст жен старше 50, муж старше 60
+
+#### Весь округ
+
+
+```{r}
+#| label: 209-rep-prep-pct-age
+df_count <- df |> 
+ filter(Status == "Повторный") |> 
+ group_by(Year, Age) |> 
+ mutate(Age_count_pct = (Age_count / Age_count[Region == "Всего"]) * 100) |> 
+ ungroup() 
+```
+
+
+\
+Рисунок 122. Число случаев повторной инвалидности (абс.) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по Дальневосточному федеральному округу в целом
+
+```{r}
+#| label: 210-rep-cnt-a3-plot-total
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 6
+#| fig-height: 5
+
+df_count |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ coord_cartesian(ylim = c(0, 5000)) +
+ theme(panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 211-rep-cnt-a3-calc-trend
+md_all <- df_count |> 
+ filter(Region == "Всего", Age == "жен старше 50, муж старше 60") |> 
+ mutate(Year_new = Year - 2019) |> 
+ lm(Age_count ~ Year_new, 
+     data = _) |> 
+ avg_comparisons(variables = "Year_new", vcov = "HAC") |> 
+ mutate(p.value = ifelse(p.value > 0.001, round(p.value, 3), "<0.001")) |> 
+ tibble()
+```
+\
+В среднем каждый год `r attr(df$Age_count, "label")` увеличается `r ifelse(md_all[1,6] < 0.05, "значимо", "незначимо")` на `r paste0(round(md_all[1,3], 2), " (", round(md_all[1,8], 2), "; ", round(md_all[1,9], 2), ")")`, p = `r ifelse(md_all[1,6] > 0.001, round(md_all[1,6], 3), "<0.001")`.
+
+#### По регионам
+
+\
+Рисунок 123. Число случаев повторной инвалидности (абс.) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 212-rep-cnt-a3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 2000)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank())
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+\
+Рисунок 124. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа
+
+```{r}
+#| label: 213-rep-pct-a3-plot-overlay
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 7
+#| fig-height: 7
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count_pct, color = Region)) +
+ geom_line(#linetype = 2, 
+  show.legend = F) +
+ geom_point(show.legend = T, size = 3) +
+ scale_color_manual(name = NULL, values = cols) +
+ coord_cartesian(ylim = c(0, 50)) +
+ guides(col = guide_legend(ncol = 3)) +
+ theme(legend.position = "top",
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+\
+Рисунок 125. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа (по отдельным субъектам)
+
+```{r}
+#| label: 214-rep-pct-a3-plot-facet
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ #geom_smooth(method = "lm", se = F, size = 1, linetype = 2) +
+ theme(legend.position = "top", 
+       axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+```{r}
+#| label: 215-rep-pct-a3-calc-max
+
+fit <- df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ mutate(Time_ID = row_number(),
+        Year_new = Year - 2019) |> 
+ lm(Age_count_pct ~ Region * Year_new, 
+     data = _) 
+
+max_inc <- avg_predictions(fit, by = "Region") |> 
+ tibble() |> 
+ select(Region, estimate) |> 
+ arrange(desc(estimate))
+```
+\
+Наибольший `r attr(df$Age_count, "label")` наблюдается в `r max_inc[1, 1]`.
+
+\
+Таблица 28. Различия среднегодовой динамики доли случаев повторной инвалидности среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины) между регионами округа (95% ДИ)
+
+```{r}
+#| label: 216-rep-pct-a3-table-compare
+tab <- fit |> 
+ avg_comparisons(variables = "Year_new", by = "Region", vcov = "HAC")
+
+sign <- tab |> 
+ filter(p.value < 0.05) |> 
+ pull(Region)  |> 
+ as.character() |> 
+ stringr::str_flatten_comma()
+
+tab |> 
+ mutate(`Разность средних\n(95% ДИ)` = paste0(
+  round(estimate, 3), "\n(",
+  round(conf.low, 3), "; ",
+  round(conf.high, 3), ")"
+ ),
+ `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))) |> 
+ select(Region, `Разность средних\n(95% ДИ)`, `p-value`) |> 
+ tab_ME() |> 
+ align(j = 2:3, align = "center", part = "all") |> 
+ bg(i = ~ `p-value` < 0.05 | `p-value` == "<0.001", bg = "#C9E7FA", part = "body")
+```
+\
+Значимое увеличение динамики инвалидности выявлены в `r sign`.
+
+\
+Рисунок 126. Доля случаев повторной инвалидности от общего числа по округу (%) среди лиц в возрасте старше 50 лет (женщины) и старше 60 лет (мужчины), по регионам округа с линией тренда и 95% ДИ
+
+```{r}
+#| label: 217-rep-pct-a3-plot-trend
+#| fig-align: "center"
+#| fig-dpi: 400
+#| fig-width: 9
+#| fig-height: 8
+
+df_lm <- fit |> 
+ avg_predictions(by = c("Year_new", "Region"), vcov = "HAC") |> 
+ mutate(Year = Year_new + 2019) |> 
+ tibble()
+
+df_count |> 
+ filter(Region != "Всего", Age == "жен старше 50, муж старше 60") |> 
+ left_join(df_lm) |> 
+ ggplot(aes(Year, Age_count_pct)) +
+ geom_line(linetype = 2) +
+ geom_point(show.legend = F, size = 4) +
+ geom_line(aes(Year, estimate), color = "blue", linewidth = 1) +
+ geom_ribbon(aes(Year, ymax = conf.high, ymin = conf.low), alpha = 0.1, show.legend = F,
+             fill = "blue") +
+ facet_wrap(~Region, ncol = 3) +
+ coord_cartesian(ylim = c(0, 50)) +
+ theme(axis.text.x = element_text(size = 10),
+       strip.text = element_text(size = 14), 
+       panel.grid.minor.x = element_blank()) +
+ labs(y = "Доля от общего абс кол-ва, %")
+```
+Точка -- значение показателя на указанный момент времени.
+
+
+

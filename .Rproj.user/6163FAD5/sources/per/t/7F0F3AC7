@@ -1,0 +1,31 @@
+{
+    "id": "7F0F3AC7",
+    "path": "~/Desktop/Заказы/+ Черенцова Ирина/Заболеваемость/Time_series.qmd",
+    "project_path": "Time_series.qmd",
+    "type": "quarto_markdown",
+    "hash": "617782572",
+    "contents": "",
+    "dirty": false,
+    "created": 1785270728132.0,
+    "source_on_save": false,
+    "relative_order": 1,
+    "properties": {
+        "rmdVisualMode": "false",
+        "chunk_output_type": "console",
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "178,3",
+        "scrollLine": "161",
+        "quartoPreviewFormat": "docx",
+        "last_setup_crc32": "",
+        "docOutlineVisible": "0"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1786357470,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1786357470494,
+    "read_only": false,
+    "read_only_alternatives": []
+}
